@@ -1,0 +1,176 @@
+# دليل البناء والتشغيل المجاني لتطبيقات Expo و React Native على الآيفون (iOS Sideloading Playbook)
+
+> **الهدف من هذا الدليل:** مرجع تقني شامل وشامل لجميع المشاكل الهيكلية، البيئية، وأنظمة التجميع (Compilers) التي تظهر عند محاولة بناء وتثبيت أي تطبيق Expo / React Native على جهاز **iPhone شخصي** باستخدام **حساب أبل مجاني** (بدون اشتراك $99/سنة) عبر **GitHub Actions** وبرنامج **Sideloadly**.
+
+---
+
+## 1. الفكرة المعمارية الأساسية (The Architecture)
+
+```mermaid
+graph TD
+    A[كود Expo / React Native] -->|رفع الكود| B[GitHub Private Repository]
+    B -->|تشغيل تلقائي| C[GitHub Actions macOS-15 Runner]
+    C -->|توليد وتجميع غير موقع| D[ملف تطبيق غير موقع: App.ipa]
+    D -->|تحميل ملف الـ IPA| E[كمبيوتر المطور Windows]
+    E -->|سحب الملف وإدخال Apple ID| F[برنامج Sideloadly]
+    F -->|توقيع محلي وتثبيت عبر USB| G[هاتف iPhone الشخصي]
+```
+
+---
+
+## 2. جدول المشاكل الجوهرية والحلول المعتمدة (Core Problems & Solutions)
+
+| # | المشكلة التقنية | السبب الجذري (Root Cause) | الحل المعتمد الجذري |
+|---|----------------|---------------------------|---------------------|
+| **1** | **EAS Cloud يطلب حساب مدفوع** | خدمة `eas build -p ios` تتطلب صلاحيات بوابة أبل لإنشاء ملفات التوقيع تلقائياً (حصرية لاشتراك $99). | التخلي عن EAS لبناء الـ iOS، واستبداله بسيرفر **GitHub Actions macOS** لبناء ملف `.ipa` غير موقع (Unsigned) مجاناً. |
+| **2** | **امتلاء قرص النظام `C:` وتلف أدوات التطوير** | تراكم كاش أدوات البناء مثل `.gradle` و `npm-cache` حتى امتلاء القرص (0 بايت فارغة)، مما أدى لتلف برنامج Sideloadly (`%1 is not a valid Win32 application`). | 1. نقل مجلدات الكاش الثقيلة إلى قرص `D:`.<br>2. ربطها برابط مجلد ذكي (`mklink /J`).<br>3. تنظيف كاش npm.<br>4. استعادة النسخة الاحتياطية للملف التالف. |
+| **3** | **تعارض ملحقات الويدجت (Widgets) مع الحساب المجاني** | أبل تمنع الحسابات المجانية نهائياً من ميزة `App Groups` وتوقيع الـ Extensions (الويدجت وشاشة القفل). وجودها يعطل التجميع ويمنع Sideloadly من التثبيت. | تعطيل إضافات الـ Widgets وملحقات الـ App Extensions مؤقتاً في ملفات التكوين أثناء مرحلة التجربة الشخصية المجانية. |
+| **4** | **إصدار Xcode القديم على سيرفرات CI** | الإصدارات الحديثة من React Native (0.80+ / 0.86+) تشترط `Xcode >= 16.1`، بينما السيرفر الافتراضي `macos-14` مثبت عليه `Xcode 15.4`. | ترقية سيرفر البناء إلى `macos-15` مع تفعيل أداة `maxim-lobanov/setup-xcode` باختيار `latest-stable` (أو 16.2+). |
+| **5** | **فقدان ملف الـ Workspace (كود الخطأ 66)** | أمر `npx expo prebuild` في بيئات الـ CI غير التفاعلية يقوم بتوليد الملفات الأصلية لكنه قد يتخطى تثبيت CocoaPods، فلا يتولد ملف `.xcworkspace`. | إضافة خطوة صريحة ومستقلة لتشغيل CocoaPods داخل مجلد `ios`: (`pod install --repo-update`). |
+| **6** | **استهداف Scheme غير التطبيق الأساسي (كود 65)** | عند محاولة اكتشاف الـ Scheme بأمر `xcodebuild -list`، يتم أحياناً التقاط أول اسم أبجدياً لمكتبة بود داخلية (مثل `EXApplication`) بدلاً من تطبيقك. | تحديد اسم الـ Scheme صراحةً في أمر الأرشفة ليكون مطابقاً تماماً لاسم التطبيق الأساسي (`name` في `app.json`). |
+| **7** | **تداخل دوال Swift 6 مع لغة C++ (Ambiguous Math Functions)** | في Swift 6 / Xcode 16 مع تفعيل C++ Interop، دوال مثل `abs(milliseconds)` تصبح مبهمة للمترجم بسبب تشابهها مع `std::abs`. | إضافة خطوة Patch سريعة عبر Node.js في السيرفر بعد `npm install` لاستبدال `abs(x)` بشرط قطعي: `(x >= 0 ? x : -x)`. |
+| **8** | **فاحص الموديولات المتشدد في Xcode (Module Verifier)** | ميزة `ENABLE_MODULE_VERIFIER` مفعّلة افتراضياً في Xcode 16 وتفحص كل ملفات الهيدرز (`umbrella headers`) الخاصة بمكتبات React Native وتوقف الأرشفة. | تمرير المعامل `ENABLE_MODULE_VERIFIER=NO` في أمر `xcodebuild archive`. |
+| **9** | **محاولة Metro حزم ملفات الخادم (`fs` و `path`) للآيفون** | وضع ملفات أو أكواد مساعدة خاصة بالخادم (تستخدم مكتبات Node.js مثل `fs`) داخل مجلد التوجيه `src/app/` يجعل محرك Metro يفحصها كشاشات موبايل، فيفشل البناء لعدم وجود `fs` في الآيفون. | **القاعدة الذهبية:** مجلد `src/app/` يُترك حصراً لشاشات الموبايل وملفات `+api.ts`. أي كود خادم أو أدوات مساعدة تُنقل خارج مجلد `src/app/` (مثل `src/server/`). |
+
+---
+
+## 3. القاعدة الذهبية لتنظيم مجلدات Expo Router
+
+عند استخدام Expo Router، يقوم محرك Metro بمسح كامل لمحتويات مجلد `src/app` عبر `require.context`:
+- ✅ **الملفات المسموح بها داخل `src/app/`:**
+  - شاشات التطبيق العادية (`.tsx` أو `.jsx`).
+  - نقاط نهاية الـ API الخاصة بالويب فقط (التي تنتهي باللاحقة الصريحة `+api.ts`).
+- ❌ **الملفات الممنوع وضعها إطلاقاً داخل `src/app/`:**
+  - أي ملف مساعد أو كود خادم يستخدم مكتبات Node.js (`fs`, `path`, `crypto`, `child_process`).
+  - **المكان الصحيح لها:** إنشاء مجلد في جذر المشروع باسم `src/server/` أو `src/lib/server/` واستدعاؤها من هناك.
+
+---
+
+## 4. ملف سير العمل الجاهز الشامل (The Master GitHub Actions Workflow)
+
+هذا الملف يوضع في مسار: `.github/workflows/build-ios.yml` داخل أي مشروع Expo جديد لضمان البناء من أول مرة بنجاح:
+
+```yaml
+name: Build iOS IPA
+
+on:
+  push:
+    branches: [ master, main ]
+  workflow_dispatch:
+
+jobs:
+  build-ipa:
+    # 1. استخدام أحدث بيئة ماك تحتوي على Xcode 16+
+    runs-on: macos-15
+
+    steps:
+      - name: 1. Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: 2. Setup Xcode 16
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: 'latest-stable'
+
+      - name: 3. Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: 4. Install NPM Dependencies
+        run: npm install
+
+      # 5. تصحيح تداخلات لغة Swift 6 في موديولات Expo (إن وجدت)
+      - name: 5. Patch Swift 6 Math Ambiguity
+        run: |
+          node -e '
+            const fs = require("fs");
+            const file = "node_modules/expo-modules-jsi/apple/Sources/ExpoModulesJSI/Coding/JavaScriptCodable+Date.swift";
+            if (fs.existsSync(file)) {
+              let content = fs.readFileSync(file, "utf8");
+              content = content.replace("abs(milliseconds)", "(milliseconds >= 0 ? milliseconds : -milliseconds)");
+              fs.writeFileSync(file, content);
+              console.log("Patched JavaScriptCodable+Date.swift successfully");
+            }
+          '
+
+      # 6. توليد ملف البيئة السري من GitHub Secrets
+      - name: 6. Inject Secrets to .env
+        run: |
+          echo "${{ secrets.ENV_FILE }}" > .env || true
+
+      # 7. توليد مجلد الأكواد الأصلية (iOS Native Prebuild)
+      - name: 7. Prebuild iOS Native Code
+        run: npx expo prebuild --platform ios --clean
+
+      # 8. تثبيت حزم CocoaPods وتوليد الـ Workspace
+      - name: 8. Install CocoaPods Dependencies
+        run: |
+          cd ios
+          pod install --repo-update || pod install
+          cd ..
+
+      # 9. تجميع وبناء أرشيف التطبيق بدون توقيع رقمي (Unsigned Build)
+      - name: 9. Build Unsigned iOS Archive
+        run: |
+          mkdir -p build
+          WORKSPACE=$(find ios -name "*.xcworkspace" -maxdepth 1 | head -n 1)
+          if [ -z "$WORKSPACE" ]; then
+            WORKSPACE="ios/App.xcworkspace"
+          fi
+          
+          # استخراج اسم السكيم من اسم المشروع أو إدخاله يدوياً
+          SCHEME=$(xcodebuild -list -workspace "$WORKSPACE" | awk '/Schemes:/{flag=1;next}/^[[:space:]]*$/{flag=0}flag' | grep -v "^Pods-" | grep -v "^EX" | head -n 1 | tr -d ' ')
+          echo "Targeting Application Scheme: $SCHEME"
+
+          set -o pipefail
+          xcodebuild archive \
+            -workspace "$WORKSPACE" \
+            -scheme "$SCHEME" \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath "$PWD/build/App.xcarchive" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            EXPANDED_CODE_SIGN_IDENTITY="" \
+            COMPILER_INDEX_STORE_ENABLE=NO \
+            ENABLE_MODULE_VERIFIER=NO
+
+      # 10. حزم التطبيق في صيغة IPA وفصل أي Extensions غير مدعومة
+      - name: 10. Package Unsigned IPA
+        run: |
+          mkdir -p Payload
+          cp -r build/App.xcarchive/Products/Applications/*.app Payload/
+          rm -rf Payload/*.app/PlugIns
+          zip -r App.ipa Payload
+
+      # 11. رفع ملف الـ IPA الناتج للتحميل المباشر
+      - name: 11. Upload IPA Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Application-IPA
+          path: App.ipa
+          retention-days: 7
+```
+
+---
+
+## 5. خطوات التثبيت على الهاتف عبر Sideloadly (Checklist)
+
+1. **تحميل الملف:** تنزيل ملف `Application-IPA.zip` من قسم Artifacts في صفحة GitHub Actions وفك الضغط عنه للحصول على ملف `App.ipa`.
+2. **تجهيز الهاتف:**
+   - توصيل الآيفون بالكمبيوتر عبر كابل USB.
+   - الضغط على **"الوثوق بهذا الكمبيوتر" (Trust)** على شاشة الآيفون.
+3. **تجهيز Sideloadly:**
+   - فتح برنامج **Sideloadly**.
+   - التأكد من ظهور اسم الآيفون في خانة `iDevice`.
+   - كتابة الإيميل في خانة `Apple ID`.
+   - سحب وإفلات ملف الـ `App.ipa` داخل واجهة البرنامج.
+   - الضغط على زر **Start**.
+   - كتابة كلمة مرور أبل ورمز التحقق الثنائي (2FA) عند طلبهما.
+4. **تفعيل التطبيق على الآيفون:**
+   - الدخول إلى: **الإعدادات (Settings)** ⬅ **عام (General)** ⬅ **إدارة الجهاز والـ VPN (VPN & Device Management)**.
+   - الضغط على إيميلك واختيار **وثوق (Trust)**.
+   - *(لإصدار iOS 16 وأحدث)*: الدخول إلى: **الإعدادات** ⬅ **الخصوصية والأمن (Privacy & Security)** ⬅ تفعيل **نمط المطور (Developer Mode)** ثم إعادة تشغيل الهاتف.
