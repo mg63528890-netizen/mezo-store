@@ -33,9 +33,9 @@ jobs:
             const fs = require("fs");
             const file = "node_modules/expo-modules-jsi/apple/Sources/ExpoModulesJSI/Coding/JavaScriptCodable+Date.swift";
             if (fs.existsSync(file)) {
-              let content = fs.readFileSync(file, "utf8");
-              content = content.replace("abs(milliseconds)", "(milliseconds >= 0 ? milliseconds : -milliseconds)");
-              fs.writeFileSync(file, content);
+              let c = fs.readFileSync(file, "utf8");
+              c = c.replace("abs(milliseconds)", "(milliseconds >= 0 ? milliseconds : -milliseconds)");
+              fs.writeFileSync(file, c);
               console.log("Patched JavaScriptCodable+Date.swift successfully");
             } else {
               console.log("File not found or not required to patch:", file);
@@ -68,6 +68,7 @@ jobs:
           cd ios
           pod install --repo-update || pod install
           cd ..
+          ls -la ios/
 
       # 9. تجميع وبناء أرشيف التطبيق بدون توقيع رقمي (Unsigned Build)
       - name: 9. Build Unsigned iOS Archive
@@ -77,12 +78,8 @@ jobs:
           if [ -z "$WORKSPACE" ]; then
             WORKSPACE="ios/Mezo.xcworkspace"
           fi
-          
-          # استخراج اسم السكيم من اسم المشروع أو استخدام الافتراضي
-          SCHEME=$(xcodebuild -list -workspace "$WORKSPACE" | awk '/Schemes:/{flag=1;next}/^[[:space:]]*$/{flag=0}flag' | grep -v "^Pods-" | grep -v "^EX" | head -n 1 | tr -d ' ')
-          if [ -z "$SCHEME" ]; then
-            SCHEME="Mezo"
-          fi
+          echo "Found workspace: $WORKSPACE"
+          SCHEME="Mezo"
           echo "Targeting Application Scheme: $SCHEME"
 
           set -o pipefail
@@ -91,26 +88,31 @@ jobs:
             -scheme "$SCHEME" \
             -configuration Release \
             -destination 'generic/platform=iOS' \
-            -archivePath "$PWD/build/App.xcarchive" \
+            -archivePath "$PWD/build/Mezo.xcarchive" \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
             EXPANDED_CODE_SIGN_IDENTITY="" \
             COMPILER_INDEX_STORE_ENABLE=NO \
-            ENABLE_MODULE_VERIFIER=NO
+            ENABLE_MODULE_VERIFIER=NO \
+            -quiet 2>&1 | tee xcodebuild.log || {
+              echo "==================== BUILD ERROR SUMMARY ===================="
+              cat xcodebuild.log
+              exit 1
+            }
 
       # 10. حزم التطبيق في صيغة IPA وفصل أي Extensions غير مدعومة
       - name: 10. Package Unsigned IPA
         run: |
           mkdir -p Payload
-          cp -r build/App.xcarchive/Products/Applications/*.app Payload/
+          cp -r build/Mezo.xcarchive/Products/Applications/*.app Payload/
           rm -rf Payload/*.app/PlugIns
-          zip -r App.ipa Payload
+          zip -r Mezo.ipa Payload
 
       # 11. رفع ملف الـ IPA الناتج للتحميل المباشر
       - name: 11. Upload IPA Artifact
         uses: actions/upload-artifact@v4
         with:
           name: Mezo-IPA
-          path: App.ipa
+          path: Mezo.ipa
           retention-days: 7
