@@ -48,3 +48,7 @@ example
 .aider-desk/
 .claude/
 *.log
+
+# Build artifacts
+*.ipa
+Mezo-IPA/
